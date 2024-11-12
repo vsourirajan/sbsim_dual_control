@@ -47,3 +47,4 @@ Follow these steps to setup locally before you run the `notebooks/SAC_Demo.ipynb
 In addition to our calibrated simulator, we released 6 years of data on 3 buildings, for further calibration, and to use, in conjunction with the simulator, for training and evaluating RL models. The dataset is part of [Tensorflow Datasets](https://github.com/tensorflow/datasets/tree/master/tensorflow_datasets/datasets/smart_buildings_dataset)
 
 -Vaibhav
+-Rishi
