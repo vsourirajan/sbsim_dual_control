@@ -32,7 +32,7 @@ Follow these steps to setup locally before you run the `notebooks/SAC_Demo.ipynb
 
 3. Create a virtual environment by running `python -m venv .venv`. Then, install poetry with `pip install poetry`
 
-4. Install the dependencies by running `poetry install`
+4. Install the dependencies by running `poetry install`. You made need to run 'poetry lock --no-update' first
 
 5. Build the `.proto` files at `smart_control/proto`into python files by running `cd smart_control/proto && protoc --python_out=. smart_control_building.proto smart_control_normalization.proto smart_control_reward.proto && cd ../..`  
 
