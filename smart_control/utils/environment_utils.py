@@ -64,9 +64,7 @@ def get_zones_from_config(
 
 
 @gin.configurable
-def get_devices_from_config(
-    configuration_path: str,
-) -> Sequence[smart_control_building_pb2.DeviceInfo]:
+def get_devices_from_config(configuration_path: str,) -> Sequence[smart_control_building_pb2.DeviceInfo]:
   """Loads up HVAC devices as a gin macro."""
   with gin.unlock_config():
     reader = reader_lib_google.RecordIoReader(input_dir=configuration_path)

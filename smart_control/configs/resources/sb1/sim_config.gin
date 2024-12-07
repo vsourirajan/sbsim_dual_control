@@ -591,7 +591,7 @@
 
     # Top-level Environment parameters
     discount_factor = 0.9
-    num_days_in_episode=14
+    num_days_in_episode=2
     metrics_reporting_interval=10
     label='tunable_simulator_sb1'
     num_hod_features = 1

@@ -32,7 +32,7 @@ Follow these steps to setup locally before you run the `notebooks/SAC_Demo.ipynb
 
 3. Create a virtual environment by running `python -m venv .venv`. Then, install poetry with `pip install poetry`
 
-4. Install the dependencies by running `poetry install`
+4. Install the dependencies by running `poetry install`. You made need to run `poetry lock --no-update` first
 
 5. Build the `.proto` files at `smart_control/proto`into python files by running `cd smart_control/proto && protoc --python_out=. smart_control_building.proto smart_control_normalization.proto smart_control_reward.proto && cd ../..`  
 
@@ -45,3 +45,8 @@ Follow these steps to setup locally before you run the `notebooks/SAC_Demo.ipynb
 ## Real World Data
 
 In addition to our calibrated simulator, we released 6 years of data on 3 buildings, for further calibration, and to use, in conjunction with the simulator, for training and evaluating RL models. The dataset is part of [Tensorflow Datasets](https://github.com/tensorflow/datasets/tree/master/tensorflow_datasets/datasets/smart_buildings_dataset)
+
+-Vaibhav
+-Rishi
+-Sammy
+-Neil
