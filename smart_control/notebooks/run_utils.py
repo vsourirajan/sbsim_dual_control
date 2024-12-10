@@ -421,3 +421,81 @@ class SchedulePolicy(tf_policy.TFPolicy):
         t_action = tf.convert_to_tensor(action)
         
         return policy_step.PolicyStep(t_action, (), ())
+    
+    
+
+    
+    
+# @title World Model Implementation
+class WorldModel(tf.keras.Model):
+    def __init__(self, state_dim, action_dim, hidden_dim=128):
+        super(WorldModel, self).__init__()
+        
+        # RNN for state transitions
+        self.rnn = tf.keras.layers.LSTM(hidden_dim, return_sequences=True, return_state=True)
+        
+        # Networks for predicting next state and reward
+        self.state_predictor = tf.keras.Sequential([
+            tf.keras.layers.Dense(hidden_dim, activation='relu'),
+            tf.keras.layers.Dense(state_dim)
+        ])
+        
+        self.reward_predictor = tf.keras.Sequential([
+            tf.keras.layers.Dense(hidden_dim, activation='relu'),
+            tf.keras.layers.Dense(1)
+        ])
+
+    def call(self, states, actions):
+        # Reshape inputs to (batch_size, timesteps=1, features)
+        states = tf.expand_dims(states, axis=1)
+        actions = tf.expand_dims(actions, axis=1)
+        
+        # Concatenate state and action along feature dimension
+        x = tf.concat([states, actions], axis=-1)
+        
+        # Get RNN outputs and states
+        rnn_out, hidden_state, cell_state = self.rnn(x)
+        
+        # Predict next state and reward directly
+        next_states = self.state_predictor(rnn_out[:, 0, :])  # Direct prediction of next state
+        rewards = self.reward_predictor(rnn_out[:, 0, :])
+        
+        return next_states, rewards, (hidden_state, cell_state)
+    
+
+    
+def train_world_model(world_model, replay_buffer, batch_size=256, training_steps=101):
+    optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3)
+    
+    for step in range(training_steps):
+        # Sample batch from replay buffer and iterate properly
+        dataset = replay_buffer.as_dataset(
+            num_parallel_calls=3,
+            sample_batch_size=batch_size,
+            num_steps=2
+        ).take(1)
+        
+        for experience_batch, _ in dataset:
+            # Extract current states, actions, next states and rewards
+            states = experience_batch.observation
+            actions = experience_batch.action[:, 0, :]  # Take first timestep actions
+            next_states = experience_batch.observation[:, 1, :]  # Take second timestep states 
+            rewards = experience_batch.reward[:, 0]  # Take first timestep rewards
+            with tf.GradientTape() as tape:
+                # Get predictions (remove time dimension for single step prediction)
+                pred_next_states, pred_rewards, _ = world_model(
+                    states[:, 0, :],  # Take first timestep states
+                    actions
+                )
+                
+                # Calculate losses
+                state_loss = tf.reduce_mean(tf.square(pred_next_states - next_states))
+                reward_loss = tf.reduce_mean(tf.square(pred_rewards - tf.expand_dims(rewards, -1)))
+                total_loss = state_loss + reward_loss
+            
+            # Update model
+            grads = tape.gradient(total_loss, world_model.trainable_variables)
+            optimizer.apply_gradients(zip(grads, world_model.trainable_variables))
+        
+        if step % 100 == 0:
+            logging_info(f'World Model Step {step}, Loss: {total_loss:.4f}')
