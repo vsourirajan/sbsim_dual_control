@@ -170,7 +170,12 @@ def create_sequential_critic_network(obs_fc_layer_units, action_fc_layer_units, 
     """Create a sequential critic network."""
     # Split the inputs into observations and actions.
     def split_inputs(inputs):
-        return {'observation': inputs[0], 'action': inputs[1]}
+        obs, action = inputs[0], inputs[1]
+        if len(obs.shape) == 1:
+            obs = tf.expand_dims(obs, 0)
+        if len(action.shape) == 1:
+            action = tf.expand_dims(action, 0)
+        return {'observation': obs, 'action': action}
 
     # Create an observation network.
     obs_network = (
@@ -203,9 +208,7 @@ def create_sequential_critic_network(obs_fc_layer_units, action_fc_layer_units, 
         name='sequential_critic',
     )
 
-class _TanhNormalProjectionNetworkWrapper(
-        tanh_normal_projection_network.TanhNormalProjectionNetwork
-):
+class _TanhNormalProjectionNetworkWrapper(tanh_normal_projection_network.TanhNormalProjectionNetwork):
     """Wrapper to pass predefined `outer_rank` to underlying projection net."""
 
     def __init__(self, sample_spec, predefined_outer_rank=1):
@@ -220,17 +223,23 @@ class _TanhNormalProjectionNetworkWrapper(
 
 def create_sequential_actor_network(actor_fc_layers, action_tensor_spec):
     """Create a sequential actor network."""
-
+    def expand_dims(inputs):
+        if len(inputs.shape) == 1:
+            return tf.expand_dims(inputs, 0)
+        return inputs
+    
     def tile_as_nest(non_nested_output):
         return tf.nest.map_structure(
                 lambda _: non_nested_output, action_tensor_spec
         )
 
     return sequential.Sequential(
-            [dense(num_units) for num_units in actor_fc_layers]
+            [tf.keras.layers.Lambda(expand_dims)]  
+            + [dense(num_units) for num_units in actor_fc_layers]
             + [tf.keras.layers.Lambda(tile_as_nest)]
             + [nest_map.NestMap(tf.nest.map_structure(_TanhNormalProjectionNetworkWrapper, 
                                                       action_tensor_spec))])
+
 
 # @title Set the RL Agent's parameters
 
@@ -364,7 +373,7 @@ class RenderAndPlotObserver:
             clear_output(wait=True)
             if self._environment._metrics_path is not None:
                 reader = get_latest_episode_reader(self._environment._metrics_path)
-                plot_timeseries_charts(reader, time_zone)
+                plot_timeseries_charts(reader, time_zone, self._save_dir = save_dir)
 
             render_env(self._environment)
 
@@ -513,349 +522,54 @@ eval_actor = actor.Actor(
     observers=[rb_observer, eval_print_status_observer, eval_render_plot_observer],
 )
 
-
-class KoopmanRLS(tf.keras.Model):
-    def __init__(self, state_dim, action_dim, lambda_f=0.90, initial_variance=1.0):
-        """
-        Recursive Least Squares Linear World Model
-        
-        Args:
-        - state_dim: Dimensionality of state vector
-        - action_dim: Dimensionality of action vector
-        - forgetting_factor: Controls how quickly old observations are discounted
-        - initial_variance: Initial diagonal value for inverse covariance matrix
-        """
-        super(KoopmanRLS, self).__init__()
-        
-        # RLS parameters
-        self.state_dim, self.action_dim, self.total_input_dim = state_dim, action_dim, state_dim + action_dim # 53, 2, 55
-        self.lambda_factor, self.initial_variance = lambda_f, initial_variance
-        self.momentum = 0.4
-        self.stability_threshold = 0.99
-        # Model parameters
-        self.theta = tf.Variable(tf.random.normal([self.total_input_dim, self.state_dim]), trainable=False, dtype=tf.float32)
-        self.P = tf.Variable(initial_variance * tf.eye(self.total_input_dim), trainable=False, dtype=tf.float32)
-
-        # Metrics
-        self.prediction_errors = []
-        self.parameter_uncertainties = []
-        self.debug_logs = dict(gains=[], denominators=[], inputs=[], theta=[], P=[])
-
-        # Initialize running statistics
-        self.mean = tf.Variable(tf.zeros([self.total_input_dim]), trainable=False, dtype=tf.float32)
-        self.std = tf.Variable(tf.ones([self.total_input_dim]), trainable=False, dtype=tf.float32)
-        self.first_input = True
-    
-    def project_dynamics(self):
-        """Project dynamics matrix to have singular values <= threshold"""
-        s, U, Vh = tf.linalg.svd(self.theta)
-        s_clipped = tf.clip_by_value(s, -self.stability_threshold, self.stability_threshold)
-        self.theta.assign(tf.matmul(U, tf.matmul(tf.linalg.diag(s_clipped), Vh)))
-
-    
-    @property
-    def A(self):
-        """Extract A matrix from theta"""
-        return self.theta[:self.state_dim]
-
-    @property
-    def B(self):
-        """Extract B matrix from theta"""
-        return self.theta[self.state_dim:]
-    
-    def call(self, states, actions):
-        """
-        Predict next states using current A and B matrices
-        Args:
-        - states: Current states (batch_size, state_dim)
-        - actions: Actions taken (batch_size, action_dim)
-        """
-        # normalize inputs, apply theta, denormalize
-        inputs = tf.concat([states, actions], axis=-1)
-        normalized_inputs = (inputs - self.mean) / self.std
-        output = (normalized_inputs @ self.theta) * self.std[:self.state_dim] + self.mean[:self.state_dim]
-        return output
-    
-    def reset(self):
-        """Reset model parameters and statistics."""
-        self.theta.assign(tf.random.normal([self.total_input_dim, self.state_dim]))
-        self.P.assign(self.initial_variance * tf.eye(self.total_input_dim))
-        self.mean.assign(tf.zeros([self.total_input_dim]))
-        self.variance.assign(tf.ones([self.total_input_dim]))
-        self.prediction_errors = []
-        self.parameter_uncertainties = []
-    
-    def update_running_stats(self, inputs):
-        new_mean = tf.reduce_mean(inputs, axis=0)
-        new_std = tf.sqrt(tf.reduce_mean(tf.square(inputs - new_mean), axis=0))
-        if(not self.first_input):
-            new_mean = self.momentum * self.mean + (1 - self.momentum) * new_mean
-            new_std = self.momentum * self.std + (1 - self.momentum) * new_std
-        else:
-            self.first_input = False
-        self.mean.assign(new_mean)
-        self.std.assign(new_std + 1e-5)
-        return (inputs - self.mean) / self.std 
-    
-    def update(self, states, actions, next_states, debug=False):
-        """
-        Vectorized RLS update for batch inputs
-        
-        Args:
-        - states: Batch of current states [batch_size, state_dim]
-        - actions: Batch of actions [batch_size, action_dim]
-        - next_states: Batch of next states [batch_size, state_dim]
-        """
-        inputs = tf.concat([states, actions], axis=-1) # (batch_size, total_input_dim)
-        inputs = self.update_running_stats(inputs)
-        predictions = inputs @ self.theta # (batch_size, total_input_dim) * (total_input_dim, state_dim) = (batch_size, state_dim)
-        # Normalize predictions before computing innovation
-        normalized_next_states = (next_states - self.mean[:self.state_dim]) / self.std[:self.state_dim]
-        innovation = normalized_next_states - predictions # (prediction error) [batch_size, state_dim]
-        
-        P_X = self.P @ tf.transpose(inputs) # (total_input_dim, total_input_dim) * (total_input_dim, batch_size) = (total_input_dim, batch_size)
-        # Denominator term (λ + X @ P @ X^T) [batch_size, batch_size]
-        R = inputs @ P_X # (batch_size, total_input_dim) * (total_input_dim, batch_size) = (batch_size, batch_size)
-        denominator = self.lambda_factor * tf.eye(batch_size) + R # (batch_size, batch_size)
-        kalman_gain = P_X @ tf.linalg.inv(denominator) # (total_input_dim * batch_size) * (batch_size, batch_size)
-        self.theta.assign_add(kalman_gain @ innovation)
-        
-        P_new = (self.P - (kalman_gain @ inputs @ self.P)) / self.lambda_factor
-        self.P.assign(P_new)         # Update precision matrix
-        
-        # Store metrics
-
-        if debug:
-            self.prediction_errors.append(tf.reduce_mean(tf.square(innovation)).numpy())
-            self.parameter_uncertainties.append(tf.linalg.trace(self.P).numpy())
-            self.debug_logs['gains'].append(kalman_gain.numpy()     )
-            self.debug_logs['denominators'].append(denominator.numpy())
-            self.debug_logs['inputs'].append(inputs.numpy())
-            self.debug_logs['theta'].append(self.theta.numpy())
-            self.debug_logs['P'].append(self.P.numpy())
-        return innovation
-
-    def save_weights(self, filepath):
-        """Save model parameters."""
-        weights = {
-            'theta': self.theta.numpy(),
-            'P': self.P.numpy(),
-            'mean': self.mean.numpy(),
-            'variance': self.variance.numpy()
-        }
-        np.save(filepath, weights)
-
-    def load_weights(self, filepath):
-        """Load model parameters."""
-        weights = np.load(filepath, allow_pickle=True).item()
-        self.theta.assign(weights['theta'])
-        self.P.assign(weights['P'])
-        self.mean.assign(weights['mean'])
-        self.variance.assign(weights['variance'])
-
-class LinearWorldModel(tf.keras.Model):
-    def __init__(self, state_dim, action_dim, hidden_dim=128):
-        super(LinearWorldModel, self).__init__()
-        # RNN for state transitions
-        self.rnn = tf.keras.layers.LSTM(hidden_dim, return_sequences=True, return_state=True)
-        # Networks for predicting next state and reward
-        self.state_predictor = KoopmanRLS(state_dim, action_dim, lambda_f=0.95, initial_variance=1.0)
-        self.reward_predictor = tf.keras.Sequential([
-            tf.keras.layers.Dense(hidden_dim, activation='relu'),
-            tf.keras.layers.Dense(1)
-        ])
-
-        self.optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3)
-
-    def call(self, states, actions):
-        next_states = self.state_predictor(states, actions)  # Direct prediction of next state
-        # Reshape inputs to (batch_size, timesteps=1, features) and concat along feature dimension
-        x = tf.concat([tf.expand_dims(states, axis=1), tf.expand_dims(actions, axis=1)], axis=-1)
-        rnn_out, hidden_state, cell_state = self.rnn(x)
-        rewards = self.reward_predictor(rnn_out[:, 0, :])
-        return next_states, rewards, (hidden_state, cell_state)
-    
-    def train_step(self, states, actions, next_states, rewards):
-        self.state_predictor.update(states, actions, next_states, debug=True)
-        self.state_predictor.project_dynamics()
-        with tf.GradientTape() as tape:
-            # Get predictions (remove time dimension for single step prediction)
-            next_state_preds, pred_rewards, info = self(states, actions)
-            reward_loss = tf.reduce_mean(tf.square(pred_rewards - tf.expand_dims(rewards, -1)))
-            grads = tape.gradient(reward_loss, self.trainable_variables)
-            self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
-    
-    def train(self, replay_buffer, batch_size=256, training_steps=64):
-        dataset = replay_buffer.as_dataset(
-            num_parallel_calls=3,
-            sample_batch_size=batch_size,
-            num_steps=2
-        ).take(training_steps)
-        #all_states = []
-        for step, (experience_batch, sample_info) in enumerate(dataset):
-            states, actions, rewards = experience_batch.observation, experience_batch.action, experience_batch.reward
-            at, atp1 = actions[:,0,:], actions[:, 1, :]
-            st, stp1 = states[:,0,:], states[:, 1, :]
-            #all_states.append(st.numpy())
-            rt = rewards[:, 0]  # Select first timestep rewards
-            self.train_step(st, at, stp1, rt)
-#return(all_states)
-           
-def generate_rollouts(world_model, initial_state, initial_reward, initial_discount, policy, rollout_length):
-    """Generate model-based rollouts with uncertainty estimation."""
-    # Convert initial state to tensor and add batch dimension
-    current_state = tf.expand_dims(tf.convert_to_tensor(initial_state, dtype=tf.float32), 0)
-    current_reward = initial_reward
-    current_discount = initial_discount
-    generated_experience = []
-
-    time_step = transition(np.array([current_state[0]], dtype=np.float32), reward=current_reward, discount=current_discount)
-    action_step = policy.action(time_step)
-    current_action = action_step.action
-
-    next_state, reward, (hidden_state, cell_state) = world_model(current_state, current_action)
-    #state_mag = [mag(next_state)]
-    for i in range(rollout_length):
-        time_step = transition(np.array([next_state[0]], dtype=np.float32), reward=reward, discount=current_discount)
-        next_action = policy.action(time_step).action # Get action from policy
-
-        generated_experience.append(
-            dict(state=current_state.numpy(), action=current_action, reward=reward,
-            next_state= next_state.numpy(), discount=current_discount.reshape(1,1))
-        )
-
-        # Update current state
-        current_state, current_reward = next_state, reward
-        next_state, reward, (hidden_state, cell_state) = world_model(current_state, current_action)
-        #next_state = safe_normalize_state(next_state, current_state, current_action)
-        #state_mag.append(mag(next_state))
-    return generated_experience, #state_mag
-
-def generate_rollouts(world_model, initial_state, initial_reward, initial_discount, policy, rollout_length):
-    """Generate model-based rollouts with uncertainty estimation."""
-    # Convert initial state to tensor and add batch dimension
-    current_state = tf.expand_dims(tf.convert_to_tensor(initial_state, dtype=tf.float32), 0)
-    current_reward = initial_reward
-    current_discount = initial_discount
-    generated_experience = []
-
-    time_step = transition(np.array([current_state[0]], dtype=np.float32), reward=current_reward, discount=current_discount)
-    action_step = policy.action(time_step)
-    current_action = action_step.action
-
-    next_state, reward, (hidden_state, cell_state) = world_model(current_state, current_action)
-
-    for i in range(rollout_length):
-        if(np.isnan(reward).any()):
-            print(f"nan at step {i}")
-            
-        else:
-            time_step = transition(np.array([next_state[0]], dtype=np.float32), reward=reward, discount=current_discount)
-            next_action = policy.action(time_step).action # Get action from policy
-
-            generated_experience.append(
-                dict(state=current_state.numpy(), action=current_action, reward=reward,
-                next_state= next_state.numpy(), discount=current_discount.reshape(1,1))
-            )
-
-            # Update current state
-            current_state, current_reward = next_state, reward
-            next_state, reward, (hidden_state, cell_state) = world_model(
-                current_state, current_action
-            )
-    return generated_experience
-
-def add_to_replay_buffer(rb_observer, experience_data):
-    """
-    Adds experience data to the Reverb replay buffer.
-    
-    Args:
-        rb_observer: ReverbAddTrajectoryObserver instance
-        experience_data: Dict containing state, action, reward, next_state, discount
-    """
-    state, action, reward, next_state, discount = experience_data.values()
-    # print(f"State shape: {state.shape}")
-    # print(f"Action shape: {action.shape}")
-    # print(f"Next state shape: {next_state.shape}")
-    # print(f"Reward shape: {reward.shape}")
- 
-    state = state.reshape(-1) # Remove any extra dimensions
-    action = tf.squeeze(action)
-    next_state = tf.squeeze(next_state)
-    reward = tf.squeeze(reward)
-    discount = tf.squeeze(discount)
-    # print(f"State shape: {state.shape}")
-    # print(f"Action shape: {action.shape}")
-    # print(f"Next state shape: {next_state.shape}")
-    # print(f"Reward shape: {reward.shape}")
-    
-    # Create a Trajectory object with the required fields
-    traj = trajectory.Trajectory(
-        step_type=tf.constant(StepType.MID, dtype=tf.int32),
-        observation=tf.constant(state, dtype=tf.float32), # Current observation/state
-        action=tf.constant(action, dtype=tf.float32),
-        policy_info=(),
-        next_step_type=tf.constant(StepType.MID, dtype=tf.int32),
-        reward=tf.constant(reward, dtype=tf.float32),
-        discount=tf.constant(discount, dtype=tf.float32)
-    )
-    
-    # Add trajectory to replay buffer
-    rb_observer(traj)
-
-
-
-
-# @title Execute the training loop
-
-num_training_iterations = 10
-num_gradient_updates_per_iter = 100
+num_training_episodes = 10
+num_agent_updates_per_iter = 100
+num_world_model_updates_per_iter = 64
 rollout_length = int(4032/16)
 
 # Collect the performance results with teh untrained model.
-eval_actor.run_and_log()
+#eval_actor.run_and_log()
 logging_info('Training.')
 
 # @title Modified Training Loop with World Model
+from world_model import LinearWorldModel, generate_rollouts, add_to_replay_buffer
 # Initialize world model
 state_dim = collect_env.observation_spec().shape[0]
 action_dim = collect_env.action_spec().shape[0]
 world_model = LinearWorldModel(state_dim, action_dim)
 
 
-# log_dir = root_dir + '/train'
-# with tf.summary.create_file_writer(log_dir).as_default() as writer:   
+log_dir = root_dir + '/train'
+with tf.summary.create_file_writer(log_dir).as_default() as writer:   
+    for iter in range(num_training_iterations):
+        print('Training iteration: ', iter)
+
+        # Collect real experiences
+        collect_actor.run()
+        world_model.train(reverb_replay, batch_size=batch_size, training_steps=num_world_model_updates_per_iter)
+        # Generate synthetic experiences
+        initial_state, initial_reward, initial_discount = ts.observation, ts.reward, ts.discount
+        synthetic_rollouts = generate_rollouts(world_model, initial_state, 
+                                                initial_reward, initial_discount, collect_policy, rollout_length)
+        #rollout_length *= 2
+        for exp in synthetic_rollouts:
+            add_to_replay_buffer(rb_observer, exp)
 
 
-for iter in range(num_training_iterations):
-    print('Training iteration: ', iter)
+        # Train agent with both real and synthetic data
+        loss_info = agent_learner.run(iterations=num_agent_updates_per_iter)
 
-    # Collect real experiences
-    collect_actor.run()
-    world_model.train(reverb_replay)
-    # Generate synthetic experiences
-    initial_state, initial_reward, initial_discount = ts.observation, ts.reward, ts.discount
-    synthetic_rollouts = generate_rollouts(world_model, initial_state, 
-                                            initial_reward, initial_discount, collect_policy, rollout_length)
-    #rollout_length *= 2
-    for exp in synthetic_rollouts:
-        add_to_replay_buffer(rb_observer, exp)
-
-
-    # Train agent with both real and synthetic data
-    loss_info = agent_learner.run(iterations=num_gradient_updates_per_iter)
-
-    logging_info(
-        'Actor Loss: %6.2f, Critic Loss: %6.2f, Alpha Loss: %6.2f '
-        % (
-            loss_info.extra.actor_loss.numpy(),
-            loss_info.extra.critic_loss.numpy(),
-            loss_info.extra.alpha_loss.numpy(),
+        logging_info(
+            'Actor Loss: %6.2f, Critic Loss: %6.2f, Alpha Loss: %6.2f '
+            % (
+                loss_info.extra.actor_loss.numpy(),
+                loss_info.extra.critic_loss.numpy(),
+                loss_info.extra.alpha_loss.numpy(),
+            )
         )
-    )
 
-    # Evaluate
-    eval_actor.run_and_log()
+        # Evaluate
+        eval_actor.run_and_log()
 
 rb_observer.close()
 reverb_server.stop()

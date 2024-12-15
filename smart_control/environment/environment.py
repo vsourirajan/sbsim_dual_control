@@ -837,9 +837,7 @@ class Environment(py_environment.PyEnvironment):
     timestamp = conversion_utils.pandas_to_proto_timestamp(
         self.building.current_timestamp
     )
-    action_request = smart_control_building_pb2.ActionRequest(
-        timestamp=timestamp
-    )
+    action_request = smart_control_building_pb2.ActionRequest(timestamp=timestamp)
 
     action = {}
     for i in range(len(self._action_names)):
@@ -1223,6 +1221,12 @@ class Environment(py_environment.PyEnvironment):
       self, action: types.NestedArray, action_names: Sequence[str]
   ) -> types.NestedArray:
     """Enables extension classes to reformat actions into base format."""
+    if hasattr(action, 'shape') and len(action.shape) > 1:
+        original_shape = action.shape
+        if isinstance(action, tf.Tensor):
+            action = tf.squeeze(action)
+        else:  # numpy array
+            action = np.squeeze(action)
     return action
 
   def _step(self, action: types.NestedArray) -> ts.TimeStep:

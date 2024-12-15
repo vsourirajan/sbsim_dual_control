@@ -52,8 +52,8 @@ KELVIN_TO_CELSIUS = 273.15
 
 
 def logging_info(*args):
-  logging.info(*args)
-  print(*args)
+    logging.info(*args)
+    print(*args)
 
 def get_energy_timeseries(reward_infos, time_zone: str) -> pd.DataFrame:
     """Returns a timeseries of energy rates."""
@@ -561,7 +561,7 @@ def plot_temperature_timeline(ax1, zone_timeseries, outside_air_temperature_time
     
     
 
-def plot_timeseries_charts(reader, time_zone):
+def plot_timeseries_charts(reader, time_zone, save_path=None, save_plots=False):
     """Plots timeseries charts."""
     observation_responses = reader.read_observation_responses(
       pd.Timestamp.min, pd.Timestamp.max
@@ -614,12 +614,11 @@ def plot_timeseries_charts(reader, time_zone):
       axes[5], zone_timeseries, outside_air_temperature_timeseries, time_zone
     )
 
-    for i, action_tuple in enumerate(action_tuples):
-        plot_action_timeline(
-            axes[6 + i], action_timeseries, action_tuple, time_zone
-        )
-
-    plt.show()
+    if(save_path is None):
+        plt.show()
+    else:
+        plt.savefig(os.path.join(save_path, 'latest_metrics.png'))
+    plt.close()
     
     
 
